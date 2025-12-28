@@ -1,39 +1,59 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 import httpx
 
 app = FastAPI()
 
-PIXELDRAIN_API = "https://pixeldrain.dev/api/file"
+BASE_URL = "https://pixeldrain.dev/api/file"
 
-@app.get("/stream/{file_id}")
-async def stream_video(file_id: str, request: Request):
-    pixeldrain_url = f"{PIXELDRAIN_API}/{file_id}"
+COMMON_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://pixeldrain.dev/"
+}
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://pixeldrain.dev/"
-    }
+# -------- HEAD SUPPORT (CRITICAL) --------
+@app.head("/stream/{file_id}")
+async def head_video(file_id: str, request: Request):
+    url = f"{BASE_URL}/{file_id}"
 
-    # Forward Range header (CRITICAL for players)
+    headers = COMMON_HEADERS.copy()
     if "range" in request.headers:
         headers["Range"] = request.headers["range"]
 
-    async def video_stream():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "GET",
-                pixeldrain_url,
-                headers=headers
-            ) as response:
+    async with httpx.AsyncClient(timeout=None) as client:
+        r = await client.head(url, headers=headers)
 
-                async for chunk in response.aiter_bytes():
+    response = Response(status_code=r.status_code)
+    for h in [
+        "content-type",
+        "content-length",
+        "accept-ranges",
+        "content-range"
+    ]:
+        if h in r.headers:
+            response.headers[h] = r.headers[h]
+
+    return response
+
+
+# -------- STREAM SUPPORT --------
+@app.get("/stream/{file_id}")
+async def stream_video(file_id: str, request: Request):
+    url = f"{BASE_URL}/{file_id}"
+
+    headers = COMMON_HEADERS.copy()
+    if "range" in request.headers:
+        headers["Range"] = request.headers["range"]
+
+    async def generator():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", url, headers=headers) as r:
+                async for chunk in r.aiter_bytes():
                     yield chunk
 
-    # IMPORTANT: Do NOT set Content-Length manually
     return StreamingResponse(
-        video_stream(),
-        media_type="video/mp4",
+        generator(),
+        status_code=206 if "range" in request.headers else 200,
         headers={
             "Accept-Ranges": "bytes"
         }
